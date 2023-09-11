@@ -6,16 +6,27 @@
 #include <time.h>
 #include <semaphore.h>
 #include <unistd.h>
-#include <pthread.h>
 #include <assert.h>
 
 #define WINDOW_W 1368
 #define WINDOW_H 768
 
+#define SEM_BOX_PADDING 5
+#define GET_SEM_W(n) (float)(WINDOW_W - n * SEM_BOX_PADDING) / n
+#define SEM_H (WINDOW_H / 2.0) - SEM_BOX_PADDING
+#define FONT_SIZE 20
+
+#define SEMS_N 2
+#define THDS_N 4
+
 typedef struct {
     char* names[255];
     int count;
 } Queue;
+
+bool is_empty(Queue* q) {
+    return q->count == 0;
+}
 
 void enqueue(Queue* q, char* v) {
     assert(q->count + 1 < 255 && "Queue cannot hold more than 255 elements");
@@ -37,30 +48,66 @@ void dequeue(Queue* q) {
 }
 
 typedef struct {
-    sem_t sem;
     char* name;
     bool blocked;
     Queue p_queue;
-} RenderingEntry;
+} Semaphore;
+Semaphore sems[SEMS_N];
 
 typedef struct {
-    pthread_t pid;
     char name[255];
     bool blocked;
+    bool has_locked_sem;
     bool dead;
-} RenderingEntryThd;
+    Semaphore* sem;
+} Thread;
+Thread thds[THDS_N];
 
-typedef struct {
-    RenderingEntryThd* thd;
-    RenderingEntry* sem;
-} ThreadArguments;
+void sem_handle_next_process(Semaphore* sem) {
+    if (is_empty(&sem->p_queue)) {
+        sem->blocked = false;
+        return;
+    }
 
-#define SEM_BOX_PADDING 5
-#define GET_SEM_W(n) (float)(WINDOW_W - n * SEM_BOX_PADDING) / n
-#define SEM_H (WINDOW_H / 2.0) - SEM_BOX_PADDING
-#define FONT_SIZE 20
+    const char* name = sem->p_queue.names[0];
+    dequeue(&sem->p_queue);
 
-void draw_thds(RenderingEntryThd* thds, size_t count) {
+    Thread* thd = NULL;
+    for (int i = 0; i < THDS_N; ++i) {
+        if (strcmp(thds[i].name, name) == 0) {
+            thd = &thds[i];
+            break;
+        }
+    }
+    assert(thd != NULL && "There is no thread running with that name");
+
+    thd->blocked = false;
+    thd->has_locked_sem = true;
+}
+
+void attach_thd_button_events(Thread* thd, Rectangle r) {
+    Vector2 mouse = GetMousePosition();
+
+    if (CheckCollisionPointRec(mouse, r) && ((IsMouseButtonPressed(MOUSE_BUTTON_LEFT)))) {
+        printf("THD: [%s]. SEM: [%s]\n", thd->name, thd->sem->name);
+
+        if (!thd->has_locked_sem) {
+            if (!thd->sem->blocked) {
+                thd->sem->blocked = true;
+                thd->has_locked_sem = true;
+            } else {
+                enqueue(&thd->sem->p_queue, thd->name);
+                thd->blocked = true;
+                thd->has_locked_sem = true;
+            }
+        } else {
+            thd->has_locked_sem = false;
+            sem_handle_next_process(thd->sem);
+        }
+    }
+}
+
+void draw_thds(Thread* thds, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         Rectangle r = {
             .x = (GET_SEM_W(count) * i) + SEM_BOX_PADDING * (i + 1),
@@ -73,43 +120,32 @@ void draw_thds(RenderingEntryThd* thds, size_t count) {
 
         if (thds[i].dead) {
             DrawRectangleRec(r, GRAY);
-            DrawText(
-                thds[i].name,
-                ((r.width / 2) + r.x) - text_len / 2.0,
-                r.y + SEM_BOX_PADDING,
-                FONT_SIZE,
-                WHITE
-            );
-            DrawText(
-                "[TERMINATED]",
-                ((r.width / 2) + r.x) - text_len / 2.0,
-                r.y + SEM_BOX_PADDING + FONT_SIZE,
-                FONT_SIZE,
-                WHITE
-            );
+            DrawText(thds[i].name, ((r.width / 2) + r.x) - text_len / 2.0, r.y + SEM_BOX_PADDING, FONT_SIZE, WHITE);
+            DrawText("[TERMINATED]", ((r.width / 2) + r.x) - text_len / 2.0, r.y + SEM_BOX_PADDING + FONT_SIZE, FONT_SIZE, WHITE);
             continue;
         }
 
         DrawRectangleRec(r, thds[i].blocked ? RED : GREEN);
-        DrawText(
-            thds[i].name,
-            ((r.width / 2) + r.x) - text_len / 2.0,
-            r.y + SEM_BOX_PADDING,
-            FONT_SIZE,
-            WHITE
-        );
+        DrawText(thds[i].name, ((r.width / 2) + r.x) - text_len / 2.0, r.y + SEM_BOX_PADDING, FONT_SIZE, WHITE);
+        DrawText(thds[i].blocked ? "[BLOCKED]" : "[RUNNING]", ((r.width / 2) + r.x) - text_len / 2.0, r.y + SEM_BOX_PADDING + FONT_SIZE, FONT_SIZE, WHITE);
 
-        DrawText(
-            thds[i].blocked ? "[BLOCKED]" : "[RUNNING]",
-            ((r.width / 2) + r.x) - text_len / 2.0,
-            r.y + SEM_BOX_PADDING + FONT_SIZE,
-            FONT_SIZE,
-            WHITE
-        );
+        if (!thds[i].blocked) {
+            Rectangle lock_btn = {
+                .x = r.x + SEM_BOX_PADDING,
+                .y = r.height - 40,
+                .width = r.width - (SEM_BOX_PADDING * 2),
+                .height = 40
+            };
+            DrawRectangleRec(lock_btn, GRAY);
+            text_len = strlen(thds[i].has_locked_sem ? "UNLOCK" : "LOCK") * FONT_SIZE;
+            DrawText(thds[i].has_locked_sem ? "UNLOCK" : "LOCK", lock_btn.x + (lock_btn.width / 2) - text_len / 2.0, lock_btn.y, FONT_SIZE, BLACK);
+
+            attach_thd_button_events(&thds[i], lock_btn);
+        }
     }
 }
 
-void draw_sems(RenderingEntry* sems, size_t count) {
+void draw_sems(Semaphore* sems, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         Rectangle r = {
             .x = (GET_SEM_W(count) * i) + SEM_BOX_PADDING * (i + 1),
@@ -118,69 +154,14 @@ void draw_sems(RenderingEntry* sems, size_t count) {
             .height = SEM_H
         };
 
-        if (sem_trywait(&sems[i].sem) == 0) {
-            sem_post(&sems[i].sem);
-            sems[i].blocked = false;
-        } else {
-            sems[i].blocked = true;
-        }
-
         DrawRectangleRec(r, sems[i].blocked ? RED : GREEN);
         int text_len = strlen(sems[i].name) * FONT_SIZE;
-        DrawText(
-            sems[i].name,
-            ((r.width / 2) + r.x) - text_len / 2.0,
-            r.y + SEM_BOX_PADDING,
-            FONT_SIZE,
-            WHITE
-        );
+        DrawText(sems[i].name, ((r.width / 2) + r.x) - text_len / 2.0, r.y + SEM_BOX_PADDING, FONT_SIZE, WHITE);
          
         for (int j = 0; j < sems[i].p_queue.count; ++j) {
-            DrawText(
-                sems[i].p_queue.names[j], 
-                ((r.width / 2) + r.x) - text_len / 2.0,
-                (r.y + (FONT_SIZE * (j+1))) + SEM_BOX_PADDING,
-                FONT_SIZE,
-                WHITE
-            );
+            DrawText(sems[i].p_queue.names[j], ((r.width / 2) + r.x) - text_len / 2.0, (r.y + (FONT_SIZE * (j + 1))) + SEM_BOX_PADDING, FONT_SIZE, WHITE);
         }
     }
-}
-
-#define SEMS_N 2
-RenderingEntry sems[SEMS_N];
-
-#define THDS_N 4
-RenderingEntryThd thds[THDS_N];
-ThreadArguments thd_args[THDS_N] = {0};
-
-void* thread(void* args) {
-    ThreadArguments* thd_arg = (ThreadArguments*) args;
-
-    time_t t;
-    srand((unsigned) time(&t));
-
-    while(true) {
-        thd_arg->thd->blocked = true;
-        enqueue(&thd_arg->sem->p_queue, thd_arg->thd->name);
-
-        sem_wait(&thd_arg->sem->sem);
-        thd_arg->thd->blocked = false;
-        dequeue(&thd_arg->sem->p_queue);
-
-        sleep(rand() % 10);
-
-        sem_post(&thd_arg->sem->sem);
-
-        sleep(1);
-
-        if (rand() % 4 == 0) {
-            break;
-        }
-    }
-
-    thd_arg->thd->dead = true;
-    pthread_exit(NULL);
 }
 
 int main(void) {
@@ -189,36 +170,29 @@ int main(void) {
 
     sems[0].blocked = false;
     sems[0].name = "SEM0";
-    sem_init(&sems[0].sem, 0, 1);
 
     sems[1].blocked = false;
     sems[1].name = "SEM1";
-    sem_init(&sems[1].sem, 0, 1);
 
     for (int i = 0; i < THDS_N; ++i) {
         sprintf(thds[i].name, "%s%d", "PID", i);
         thds[i].blocked = false;
         thds[i].dead = false;
+        thds[i].has_locked_sem = false;
 
         if (i < 2) {
-            thd_args[i].sem = &sems[0];
+            thds[i].sem = &sems[0];
         } else {
-            thd_args[i].sem = &sems[1];
+            thds[i].sem = &sems[1];
         }
-        thd_args[i].thd = &thds[i]; 
-
-        int x = pthread_create(&thds[i].pid, NULL, &thread, (void*)&thd_args[i]);
-        assert(x == 0 && "Failed to do thread");
     }
 
     while(!WindowShouldClose()) {
         BeginDrawing();
-        draw_thds(thds, sizeof(thds) / sizeof(RenderingEntryThd));
-        draw_sems(sems, sizeof(sems) / sizeof(RenderingEntry));
+        draw_thds(thds, sizeof(thds) / sizeof(Thread));
+        draw_sems(sems, sizeof(sems) / sizeof(Semaphore));
         EndDrawing();
     }
-
-    sem_destroy(&sems[0].sem);
 
     return 0;
 }
