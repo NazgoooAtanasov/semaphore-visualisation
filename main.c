@@ -58,7 +58,6 @@ typedef struct {
     char name[255];
     bool blocked;
     bool has_locked_sem;
-    bool dead;
     Semaphore* sem;
 } Thread;
 Thread thds[THDS_N];
@@ -118,13 +117,6 @@ void draw_thds(Thread* thds, size_t count) {
 
         int text_len = strlen(thds[i].name) * FONT_SIZE;
 
-        if (thds[i].dead) {
-            DrawRectangleRec(r, GRAY);
-            DrawText(thds[i].name, ((r.width / 2) + r.x) - text_len / 2.0, r.y + SEM_BOX_PADDING, FONT_SIZE, WHITE);
-            DrawText("[TERMINATED]", ((r.width / 2) + r.x) - text_len / 2.0, r.y + SEM_BOX_PADDING + FONT_SIZE, FONT_SIZE, WHITE);
-            continue;
-        }
-
         DrawRectangleRec(r, thds[i].blocked ? RED : GREEN);
         DrawText(thds[i].name, ((r.width / 2) + r.x) - text_len / 2.0, r.y + SEM_BOX_PADDING, FONT_SIZE, WHITE);
         DrawText(thds[i].blocked ? "[BLOCKED]" : "[RUNNING]", ((r.width / 2) + r.x) - text_len / 2.0, r.y + SEM_BOX_PADDING + FONT_SIZE, FONT_SIZE, WHITE);
@@ -177,7 +169,6 @@ int main(void) {
     for (int i = 0; i < THDS_N; ++i) {
         sprintf(thds[i].name, "%s%d", "PID", i);
         thds[i].blocked = false;
-        thds[i].dead = false;
         thds[i].has_locked_sem = false;
 
         if (i < 2) {
